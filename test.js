@@ -19,8 +19,14 @@ const api = http.createServer((req, res) => {
     peticiones.push({ url: req.url, auth: req.headers.authorization, cuerpo: cuerpo ? JSON.parse(cuerpo) : null });
     res.setHeader('Content-Type', 'application/json');
     if (req.url.startsWith('/v1/models')) {
-      return res.end(JSON.stringify({ success: true, object: 'list', data: [{ id: 'gemini-test' }, { id: 'gpt-5.2-codex' }, { id: 'claude-sonnet-4-6' }] }));
+      return res.end(JSON.stringify({ success: true, object: 'list', data: [{ id: 'gemini-test' }, { id: 'gpt-5.2-codex' }, { id: 'claude-sonnet-4-6' }, { id: 'gpt-image-2', category: 'image' }, { id: 'gpt-4o-mini-tts', category: 'audio' }] }));
     }
+    if (req.url === '/v1/audio/speech') {
+      res.setHeader('Content-Type', 'audio/wav');
+      return res.end('AUDIO');
+    }
+    if (req.url === '/_llms/en/api-manual.txt') return res.end('otra linea\n- [Flux](en/api-reference/images/flux.md)\n');
+    if (req.url === '/en/api-reference/images/flux.md') return res.end('campos de flux');
     if (req.url === '/v1/chat/completions') {
       return res.end(JSON.stringify({ code: 200, data: { model: 'gemini-test', choices: [{ message: { content: 'respuesta de gemini' } }], usage: { total_tokens: 7 } } }));
     }
@@ -57,7 +63,7 @@ async function tool(name, args) {
 async function main() {
   await new Promise((ok) => api.listen(PUERTO_API, '127.0.0.1', ok));
   const hijo = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
-    env: { ...process.env, PORT: String(PUERTO), APIMART_API_KEY: CLAVE, CONNECTOR_TOKEN: TOKEN, APIMART_BASE_URL: `http://127.0.0.1:${PUERTO_API}`, POLL_MS: '50' },
+    env: { ...process.env, PORT: String(PUERTO), APIMART_API_KEY: CLAVE, CONNECTOR_TOKEN: TOKEN, APIMART_BASE_URL: `http://127.0.0.1:${PUERTO_API}`, APIMART_DOCS_URL: `http://127.0.0.1:${PUERTO_API}`, POLL_MS: '50' },
     stdio: 'ignore',
   });
   try {
@@ -80,10 +86,29 @@ async function main() {
     assert.equal(get.status, 405);
 
     const lista = await rpc('tools/list', {});
-    assert.deepEqual(lista.result.tools.map((t) => t.name), ['modelos_texto_apimart', 'chat_apimart', 'modelos_video_apimart', 'crear_video_apimart', 'estado_video_apimart']);
+    assert.deepEqual(lista.result.tools.map((t) => t.name), ['modelos_apimart', 'documentacion_apimart', 'generar_apimart', 'chat_apimart', 'modelos_video_apimart', 'crear_video_apimart', 'estado_tarea_apimart']);
 
-    const catalogo = await tool('modelos_texto_apimart', { filtro: 'GEMINI' });
+    const catalogo = await tool('modelos_apimart', { filtro: 'GEMINI' });
     assert.deepEqual(catalogo.datos.modelos.map((m) => m.id), ['gemini-test']);
+    assert.deepEqual((await tool('modelos_apimart', { categoria: 'image' })).datos.modelos.map((m) => m.id), ['gpt-image-2']);
+
+    const antesGen = peticiones.length;
+    assert.equal((await tool('generar_apimart', { ruta: '/v1/account/keys', cuerpo: {} })).isError, true);
+    assert.equal((await tool('generar_apimart', { ruta: '/v1/images/../keys', cuerpo: {} })).isError, true);
+    assert.equal((await tool('generar_apimart', { ruta: '/v1/images/generations', cuerpo: { model: 'inventado', prompt: 'x' } })).isError, true);
+    assert.equal(peticiones.length, antesGen, 'rutas y modelos invalidos no gastan saldo');
+
+    const img = await tool('generar_apimart', { ruta: '/v1/images/generations', cuerpo: { model: 'gpt-image-2', prompt: 'tierra' } });
+    assert.equal(img.datos.task_id, 'task_123');
+    assert.equal(peticiones.at(-1).cuerpo.prompt, 'tierra');
+
+    const voz = await rpc('tools/call', { name: 'generar_apimart', arguments: { ruta: '/v1/audio/speech', cuerpo: { model: 'gpt-4o-mini-tts', input: 'hola', voice: 'nova' } } });
+    assert.equal(voz.result.content[0].type, 'audio');
+    assert.equal(Buffer.from(voz.result.content[0].data, 'base64').toString(), 'AUDIO');
+
+    assert.equal((await tool('documentacion_apimart', { pagina: 'en/../../secreto.md' })).isError, true);
+    assert.ok((await tool('documentacion_apimart', { buscar: 'FLUX' })).datos.coincidencias[0].includes('flux'));
+    assert.ok((await tool('documentacion_apimart', { pagina: 'en/api-reference/images/flux.md' })).content[0].text.includes('campos'));
 
     const antesChat = peticiones.length;
     assert.equal((await tool('chat_apimart', { modelo: 'no-existe', mensaje: 'hola' })).isError, true);
@@ -139,16 +164,16 @@ async function main() {
     enviada = peticiones.at(-1);
     assert.deepEqual(enviada.cuerpo, { model: 'seedance-2.0', prompt: 'x', size: '9:16', generate_audio: false });
 
-    assert.equal((await tool('estado_video_apimart', { task_id: '../secreto' })).isError, true);
+    assert.equal((await tool('estado_tarea_apimart', { task_id: '../secreto' })).isError, true);
 
-    const curso = await tool('estado_video_apimart', { task_id: 'task_123', esperar_segundos: 0 });
+    const curso = await tool('estado_tarea_apimart', { task_id: 'task_123', esperar_segundos: 0 });
     assert.equal(curso.datos.estado, 'processing');
-    const fin = await tool('estado_video_apimart', { task_id: 'task_123', esperar_segundos: 5 });
+    const fin = await tool('estado_tarea_apimart', { task_id: 'task_123', esperar_segundos: 5 });
     assert.equal(fin.datos.estado, 'completed');
-    assert.deepEqual(fin.datos.video_urls, ['https://cdn.test/v.mp4']);
+    assert.deepEqual(fin.datos.urls, ['https://cdn.test/v.mp4']);
     assert.equal(fin.datos.costo, 0.5);
 
-    const fallo = await tool('estado_video_apimart', { task_id: 'task_error' });
+    const fallo = await tool('estado_tarea_apimart', { task_id: 'task_error' });
     assert.equal(fallo.isError, true);
     assert.ok(!fallo.content[0].text.includes(CLAVE), 'los errores no revelan la clave');
 
