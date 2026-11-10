@@ -320,11 +320,9 @@ async function estadoTarea(a) {
   }
 }
 
-// ---- Texto: otros modelos (Gemini, GPT, Codex...) ----
-// El catalogo se lee en vivo de APIMart; no hay IDs fijos aqui.
-const MAX_TOKENS_TOPE = 4000;
-const MAX_TOKENS_DEFECTO = 1000;
-const MAX_MENSAJE = 20000;
+// ---- Catalogo en vivo de APIMart ----
+// Este conector NO envia texto a modelos de chat (GPT, Codex, Gemini...): el asistente
+// que lo usa responde con su propio modelo y no gasta tokens de texto de APIMart.
 let catalogoCache = { hasta: 0, modelos: [] };
 
 async function catalogoTexto() {
@@ -357,7 +355,7 @@ async function modelosTexto(a) {
     total_en_catalogo: modelos.length,
     coincidencias: lista.length,
     modelos: lista,
-    aviso: 'Catalogo en vivo. Para texto usa chat_apimart. Para imagen, video, audio o musica consulta documentacion_apimart y usa generar_apimart.',
+    aviso: 'Catalogo en vivo. Este conector no envia texto a modelos de chat: responde tu mismo con tu propio modelo. Para imagen, video, audio o musica consulta documentacion_apimart y usa generar_apimart.',
   });
 }
 
@@ -425,75 +423,16 @@ async function generar(a) {
   return respuestaTool({ respuesta: r.json ?? r.texto.slice(0, 2000) });
 }
 
-function textoDeChat(json) {
-  const d = json?.data?.choices ? json.data : json;
-  return { texto: d?.choices?.[0]?.message?.content, uso: d?.usage, modelo: d?.model };
-}
-
-function textoDeResponses(json) {
-  const d = json?.data?.output ? json.data : json;
-  const partes = (d?.output || [])
-    .filter((o) => o?.type === 'message')
-    .flatMap((o) => o.content || [])
-    .filter((c) => c?.type === 'output_text' && typeof c.text === 'string')
-    .map((c) => c.text);
-  return { texto: partes.join(''), uso: d?.usage, modelo: d?.model };
-}
-
-async function chat(a) {
-  if (typeof a.modelo !== 'string' || !/^[A-Za-z0-9._:-]{1,100}$/.test(a.modelo)) return respuestaTool('modelo no valido.', true);
-  if (typeof a.mensaje !== 'string' || !a.mensaje.trim()) return respuestaTool('Falta el mensaje.', true);
-  if (a.mensaje.length > MAX_MENSAJE) return respuestaTool(`El mensaje supera ${MAX_MENSAJE} caracteres.`, true);
-  if (a.sistema !== undefined && (typeof a.sistema !== 'string' || a.sistema.length > MAX_MENSAJE)) return respuestaTool('sistema no valido.', true);
-  if (a.max_tokens !== undefined && !Number.isInteger(a.max_tokens)) return respuestaTool('max_tokens debe ser un entero.', true);
-  if (!API_KEY) return respuestaTool('Falta configurar APIMART_API_KEY en Render.', true);
-  const maxTokens = Math.min(Math.max(a.max_tokens ?? MAX_TOKENS_DEFECTO, 1), MAX_TOKENS_TOPE);
-
-  // Validar contra el catalogo en vivo antes de gastar.
-  let modelos;
-  try {
-    modelos = await catalogoTexto();
-  } catch (e) {
-    return respuestaTool(`No se pudo comprobar el catalogo de APIMart: ${e.message}`, true);
-  }
-  const entrada = modelos.find((m) => m.id === a.modelo);
-  if (!entrada) return respuestaTool(`El modelo "${a.modelo}" no esta en el catalogo de APIMart. Usa modelos_apimart para ver los ids.`, true);
-
-  // Los modelos Codex estan documentados solo en /v1/responses.
-  const usaResponses = /codex/i.test(a.modelo);
-  const cuerpo = usaResponses
-    ? { model: a.modelo, input: a.mensaje, max_output_tokens: maxTokens, ...(a.sistema ? { instructions: a.sistema } : {}) }
-    : { model: a.modelo, messages: [...(a.sistema ? [{ role: 'system', content: a.sistema }] : []), { role: 'user', content: a.mensaje }], max_tokens: maxTokens, stream: false };
-
-  const rutas = usaResponses ? ['/v1/responses'] : ['/v1/chat/completions', '/api/v1/chat/completions'];
-  let r;
-  for (const ruta of rutas) {
-    try {
-      r = await llamarApi(ruta, { method: 'POST', body: JSON.stringify(cuerpo), timeoutMs: 90000 });
-    } catch (e) {
-      return respuestaTool(`No hubo respuesta de APIMart (${e.name}). Puede que la peticion se haya cobrado: no la repitas sin avisar al usuario.`, true);
-    }
-    if (r.status !== 404) break; // un 404 significa que la ruta no existe: no se cobro nada.
-  }
-  if (!r.ok) return respuestaTool(mensajeApi(r), true);
-
-  const { texto, uso, modelo } = usaResponses ? textoDeResponses(r.json) : textoDeChat(r.json);
-  if (typeof texto !== 'string' || !texto) {
-    return respuestaTool({ aviso: 'APIMart respondio sin texto reconocible.', respuesta_sin_procesar: r.texto.slice(0, 1500) }, true);
-  }
-  return respuestaTool(sinIndefinidos({ modelo: modelo || a.modelo, endpoint: usaResponses ? 'responses' : 'chat/completions', respuesta: texto, uso }));
-}
-
 const HERRAMIENTAS = [
   {
     name: 'modelos_apimart',
     title: 'Modelos de APIMart (catalogo en vivo)',
-    description: 'Lee el catalogo en vivo de APIMart (texto, imagen, video y audio). Filtra por texto o categoria para saber que ids existen. No gasta saldo.',
+    description: 'Lee el catalogo en vivo de APIMart (imagen, video y audio). Filtra por texto o categoria para saber que ids existen. No gasta saldo.',
     inputSchema: {
       type: 'object',
       properties: {
         filtro: { type: 'string', description: 'Texto a buscar dentro del id del modelo, como "gemini" o "flux".' },
-        categoria: { type: 'string', enum: ['chat', 'image', 'video', 'audio'] },
+        categoria: { type: 'string', enum: ['image', 'video', 'audio'] },
       },
       additionalProperties: false,
     },
@@ -524,23 +463,6 @@ const HERRAMIENTAS = [
         cuerpo: { type: 'object', description: 'Campos JSON exactos de la documentacion, incluido model si aplica.', additionalProperties: true },
       },
       required: ['ruta', 'cuerpo'],
-      additionalProperties: false,
-    },
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-  },
-  {
-    name: 'chat_apimart',
-    title: 'Preguntar a otro modelo via APIMart',
-    description: 'Envia un mensaje a otro modelo de IA (Gemini, GPT, Codex...) a traves de APIMart y devuelve su respuesta. GASTA SALDO de la cuenta del usuario: usala solo cuando el usuario pida expresamente ese modelo, y no reintentes tras un error. Claude sigue siendo quien conversa con el usuario: envia la pregunta y entrega la respuesta. Un solo turno, sin streaming.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        modelo: { type: 'string', description: 'Id exacto del modelo, tomado de modelos_apimart.' },
-        mensaje: { type: 'string', description: 'Pregunta o tarea para el modelo.' },
-        sistema: { type: 'string', description: 'Instruccion de sistema opcional.' },
-        max_tokens: { type: 'integer', minimum: 1, maximum: MAX_TOKENS_TOPE, description: `Maximo de tokens de respuesta. Por defecto ${MAX_TOKENS_DEFECTO}; tope ${MAX_TOKENS_TOPE}.` },
-      },
-      required: ['modelo', 'mensaje'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -592,7 +514,7 @@ const HERRAMIENTAS = [
   },
 ];
 
-const INSTRUCCIONES = 'Usa los modelos de texto, imagen, video, audio y musica de la cuenta de APIMart del usuario. Todo lo que genera gasta saldo. Pregunta el modelo salvo que el usuario lo haya nombrado o pida que lo elijas. Los enlaces caducan a las 24 horas.';
+const INSTRUCCIONES = 'Usa los modelos de imagen, video, audio y musica de la cuenta de APIMart del usuario. Para conversar, redactar o pensar usa tu propio modelo: este conector no envia texto a modelos de chat. Todo lo que genera gasta saldo. Pregunta el modelo salvo que el usuario lo haya nombrado o pida que lo elijas. Los enlaces caducan a las 24 horas.';
 
 async function atenderRpc(m) {
   switch (m.method) {
@@ -617,7 +539,6 @@ async function atenderRpc(m) {
       if (m.params?.name === 'modelos_apimart') return modelosTexto(args);
       if (m.params?.name === 'documentacion_apimart') return documentacion(args);
       if (m.params?.name === 'generar_apimart') return generar(args);
-      if (m.params?.name === 'chat_apimart') return chat(args);
       throw Object.assign(new Error('Herramienta desconocida'), { code: -32602 });
     }
     default:

@@ -86,7 +86,7 @@ async function main() {
     assert.equal(get.status, 405);
 
     const lista = await rpc('tools/list', {});
-    assert.deepEqual(lista.result.tools.map((t) => t.name), ['modelos_apimart', 'documentacion_apimart', 'generar_apimart', 'chat_apimart', 'modelos_video_apimart', 'crear_video_apimart', 'estado_tarea_apimart']);
+    assert.deepEqual(lista.result.tools.map((t) => t.name), ['modelos_apimart', 'documentacion_apimart', 'generar_apimart', 'modelos_video_apimart', 'crear_video_apimart', 'estado_tarea_apimart']);
 
     const catalogo = await tool('modelos_apimart', { filtro: 'GEMINI' });
     assert.deepEqual(catalogo.datos.modelos.map((m) => m.id), ['gemini-test']);
@@ -110,25 +110,13 @@ async function main() {
     assert.ok((await tool('documentacion_apimart', { buscar: 'FLUX' })).datos.coincidencias[0].includes('flux'));
     assert.ok((await tool('documentacion_apimart', { pagina: 'en/api-reference/images/flux.md' })).content[0].text.includes('campos'));
 
+    // El conector ya no envia texto a modelos de chat (GPT, Codex, Gemini...): no gasta tokens de APIMart.
     const antesChat = peticiones.length;
-    assert.equal((await tool('chat_apimart', { modelo: 'no-existe', mensaje: 'hola' })).isError, true);
-    assert.equal((await tool('chat_apimart', { modelo: 'gemini-test', mensaje: '  ' })).isError, true);
-    assert.equal(peticiones.slice(antesChat).some((p) => p.url !== '/v1/models?expand=category'), false, 'un modelo inexistente nunca gasta saldo');
-
-    const g = await tool('chat_apimart', { modelo: 'gemini-test', mensaje: 'hola', sistema: 'breve', max_tokens: 99999 });
-    assert.equal(g.datos.respuesta, 'respuesta de gemini');
-    assert.equal(g.datos.uso.total_tokens, 7);
-    let ult = peticiones.at(-1);
-    assert.equal(ult.url, '/v1/chat/completions');
-    assert.equal(ult.cuerpo.max_tokens, 4000, 'max_tokens se limita al tope');
-    assert.deepEqual(ult.cuerpo.messages, [{ role: 'system', content: 'breve' }, { role: 'user', content: 'hola' }]);
-
-    const c = await tool('chat_apimart', { modelo: 'gpt-5.2-codex', mensaje: 'hola' });
-    assert.equal(c.datos.respuesta, 'respuesta de codex');
-    ult = peticiones.at(-1);
-    assert.equal(ult.url, '/v1/responses');
-    assert.equal(ult.cuerpo.input, 'hola');
-    assert.ok(!JSON.stringify(g).includes(CLAVE) && !JSON.stringify(c).includes(CLAVE));
+    const sinChat = await rpc('tools/call', { name: 'chat_apimart', arguments: { modelo: 'gpt-5.2-codex', mensaje: 'hola' } });
+    assert.ok(sinChat.error, 'chat_apimart ya no existe');
+    assert.equal(peticiones.length, antesChat, 'pedir chat nunca llega a APIMart');
+    assert.equal((await tool('generar_apimart', { ruta: '/v1/chat/completions', cuerpo: { model: 'gemini-test' } })).isError, true);
+    assert.equal(peticiones.length, antesChat, 'generar_apimart no permite rutas de chat');
 
     const modelos = await tool('modelos_video_apimart', {});
     assert.equal(modelos.datos.modelos.length, 8);
